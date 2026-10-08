@@ -1,0 +1,50 @@
+services:
+  - type: web
+    name: nexus
+    runtime: static
+    staticPublishPath: ./
+    pullRequestPreviewsEnabled: false
+
+    # SPA fallback + serve /sw.js with correct scope
+    routes:
+      - type: rewrite
+        source: /sw.js
+        destination: /sw.js
+      - type: rewrite
+        source: /*
+        destination: /index.html
+
+    headers:
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: no-referrer
+      - path: /*
+        name: Permissions-Policy
+        value: camera=(), microphone=(), geolocation=(), interest-cohort=()
+      - path: /*
+        name: Strict-Transport-Security
+        value: max-age=31536000; includeSubDomains
+      - path: /*
+        name: Cross-Origin-Opener-Policy
+        value: same-origin
+      - path: /*
+        name: X-Robots-Tag
+        value: noindex, nofollow, noarchive, nosnippet
+      # Service worker must not be cached by the CDN
+      - path: /sw.js
+        name: Cache-Control
+        value: public, max-age=0, must-revalidate
+      # Manifest can be cached longer
+      - path: /manifest.json
+        name: Cache-Control
+        value: public, max-age=3600
+      # Icon can be cached hard
+      - path: /icon.svg
+        name: Cache-Control
+        value: public, max-age=31536000, immutable
