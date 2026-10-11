@@ -1,20 +1,31 @@
-// Nexus Service Worker
-// Cache-first for the app shell, network-only for everything else.
+// TosCheZy Service Worker
+// Cache-first for the app shell, network-first for everything else.
 // Bumping CACHE_VERSION invalidates old caches on next visit.
 
-const CACHE_VERSION = 'nexus-v1';
+const CACHE_VERSION = 'toschezy-v2';
 const APP_SHELL = [
   '/',
   '/index.html',
   '/manifest.json',
   '/icon.svg',
+  '/icon-192.png',
+  '/icon-512.png',
+  '/icon-192-maskable.png',
+  '/icon-512-maskable.png',
 ];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_VERSION).then((cache) => cache.addAll(APP_SHELL))
+    caches.open(CACHE_VERSION).then((cache) => {
+      // addAll fails hard if any file 404s; add each independently instead
+      return Promise.all(
+        APP_SHELL.map((url) =>
+          cache.add(url).catch((err) => console.warn('SW: failed to cache', url, err))
+        )
+      );
+    })
   );
-  self.skipWaiting();
+  // Do NOT skipWaiting automatically — let the page decide when to update
 });
 
 self.addEventListener('activate', (event) => {
@@ -29,47 +40,61 @@ self.addEventListener('activate', (event) => {
   );
 });
 
+// Listen for page telling us to activate immediately
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
+});
+
 self.addEventListener('fetch', (event) => {
   const { request } = event;
 
   // Only handle GET
   if (request.method !== 'GET') return;
 
-  // Don't touch cross-origin (esm.sh, trackers, etc.)
   const url = new URL(request.url);
+
+  // Cross-origin (esm.sh, trackers, etc.) — bypass SW entirely
   if (url.origin !== self.location.origin) return;
 
-  // Only handle same-origin shell assets
-  const isShell = APP_SHELL.some((path) => url.pathname === path || url.pathname === path + '/');
+  // Service worker itself should never be cached
+  if (url.pathname === '/sw.js') return;
+
+  const isShell = APP_SHELL.some(
+    (path) => url.pathname === path || url.pathname === path + '/'
+  );
+
   if (!isShell) {
-    // Network-only for everything else, but fall back to cache on failure
+    // Network-first for non-shell same-origin, fall back to cache
     event.respondWith(
-      fetch(request).catch(() => caches.match(request))
+      fetch(request)
+        .then((res) => {
+          if (res && res.status === 200) {
+            const copy = res.clone();
+            caches.open(CACHE_VERSION).then((cache) => cache.put(request, copy));
+          }
+          return res;
+        })
+        .catch(() => caches.match(request))
     );
     return;
   }
 
-  // Cache-first for app shell
+  // Cache-first for the app shell with background revalidation
   event.respondWith(
     caches.match(request).then((cached) => {
-      if (cached) {
-        // Refresh in background
-        fetch(request)
-          .then((res) => {
-            if (res && res.status === 200) {
-              caches.open(CACHE_VERSION).then((cache) => cache.put(request, res.clone()));
-            }
-          })
-          .catch(() => {});
-        return cached;
-      }
-      return fetch(request).then((res) => {
-        if (res && res.status === 200) {
-          const copy = res.clone();
-          caches.open(CACHE_VERSION).then((cache) => cache.put(request, copy));
-        }
-        return res;
-      });
+      const network = fetch(request)
+        .then((res) => {
+          if (res && res.status === 200) {
+            const copy = res.clone();
+            caches.open(CACHE_VERSION).then((cache) => cache.put(request, copy));
+          }
+          return res;
+        })
+        .catch(() => cached);
+
+      return cached || network;
     })
   );
 });

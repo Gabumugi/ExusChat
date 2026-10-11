@@ -9,7 +9,18 @@
 <meta name="description" content="TosCheZy — decentralized, encrypted, passwordless P2P chat.">
 <link rel="manifest" href="/manifest.json">
 <link rel="icon" type="image/svg+xml" href="/icon.svg">
-<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="apple-touch-icon" sizes="192x192" href="/icon-192.png">
+<link rel="apple-touch-icon" sizes="512x512" href="/icon-512.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="TosCheZy">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="msapplication-TileColor" content="#0a0a0f">
+<meta name="msapplication-TileImage" content="/icon-192.png">
+<meta name="format-detection" content="telephone=no">
 <title>TosCheZy — Passwordless P2P Chat</title>
 <style>
 :root {
@@ -379,6 +390,46 @@ header {
 .modal-actions button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
 .modal-actions button:hover { transform: translateY(-1px); }
 #sidebarOverlay { display: none; }
+
+/* ===== PWA update banner ===== */
+#updateBanner {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 400;
+  display: none;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px 10px 18px;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: #fff;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: 0 8px 32px rgba(124,92,255,0.5);
+  animation: slideDown 0.3s ease-out;
+  max-width: calc(100vw - 24px);
+}
+#updateBanner.show { display: flex; }
+#updateBanner button {
+  background: rgba(255,255,255,0.22);
+  border: none;
+  color: #fff;
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+#updateBanner button:hover { background: rgba(255,255,255,0.35); }
+@keyframes slideDown {
+  from { opacity: 0; transform: translateX(-50%) translateY(-20px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
 .discover-content { max-width: 460px; }
 .tab-bar {
   display: flex; gap: 4px; padding: 4px;
@@ -550,6 +601,10 @@ header {
         <span>🛡️</span>
         <span>About TosCheZy</span>
       </button>
+      <button class="about-btn" id="installBtn" style="display:none;">
+        <span>⬇️</span>
+        <span>Install App</span>
+      </button>
     </div>
   </aside>
   <div id="sidebarOverlay"></div>
@@ -704,6 +759,31 @@ header {
   </div>
 </div>
 
+<div id="updateBanner">
+  <span>A new version of TosCheZy is available.</span>
+  <button id="updateBannerBtn">Reload</button>
+</div>
+
+<div class="modal" id="iosInstallModal">
+  <div class="modal-content" style="text-align:left;">
+    <div class="policy-header">
+      <div class="policy-shield">📱</div>
+      <div class="policy-header-text">
+        <h3>Install on iOS</h3>
+        <div class="subtitle">Add to Home Screen</div>
+      </div>
+    </div>
+    <ol style="font-size:14px;line-height:1.7;padding-left:22px;color:var(--text);margin-bottom:16px;">
+      <li>Tap the <strong>Share</strong> button <span style="display:inline-block;padding:1px 6px;background:var(--surface);border:1px solid var(--border);border-radius:4px;font-size:12px;">⬆︎</span> in Safari's toolbar.</li>
+      <li>Scroll down and tap <strong>Add to Home Screen</strong>.</li>
+      <li>Tap <strong>Add</strong> in the top-right.</li>
+    </ol>
+    <div class="modal-actions">
+      <button class="primary" id="iosInstallCloseBtn">Got it</button>
+    </div>
+  </div>
+</div>
+
 <script type="module">
 import { joinRoom } from 'https://esm.sh/trystero@0.21.5/torrent';
 import QRCode from 'https://esm.sh/qrcode@1.5.3';
@@ -728,6 +808,7 @@ const LOBBY_KEY = 'toschezy-public-lobby-shared-key-2026-v1';
 const ROOMS_KEY = 'toschezy_rooms_v2';
 const ACTIVE_ROOM_KEY = 'toschezy_active_room_v2';
 const PEER_NICKS_KEY = 'toschezy_peer_nicks_v2';
+const ROOM_NAMES_KEY = 'toschezy_room_names_v1';
 const USER_ID_KEY = 'toschezy_userId';
 const NICK_KEY = 'toschezy_nickname';
 const THEME_KEY = 'toschezy_theme';
@@ -759,6 +840,16 @@ const peerNicknames = new Map();
 
 /** @type {Map<string, any>} */
 const discoveredRooms = new Map();
+
+// PWA install prompt (fired by Chrome / Edge / Android)
+let deferredInstallPrompt = null;
+
+// Detect iOS + standalone
+const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent) && !window.MSStream;
+const isStandalone =
+  window.matchMedia('(display-mode: standalone)').matches ||
+  window.navigator.standalone === true ||
+  document.referrer.startsWith('android-app://');
 
 let lobbyRoom = null;
 let lobbyActions = null;
@@ -832,6 +923,11 @@ const publicCount = $('publicCount');
 const refreshPublicBtn = $('refreshPublicBtn');
 const discoverCancelBtn1 = $('discoverCancelBtn1');
 const discoverCancelBtn2 = $('discoverCancelBtn2');
+const installBtn = $('installBtn');
+const updateBanner = $('updateBanner');
+const updateBannerBtn = $('updateBannerBtn');
+const iosInstallModal = $('iosInstallModal');
+const iosInstallCloseBtn = $('iosInstallCloseBtn');
 
 // ============================================================
 // UTILITIES
@@ -919,14 +1015,16 @@ function parseInviteLink(text) {
     const params = new URLSearchParams(url.hash.slice(1));
     const r = params.get('r');
     const k = params.get('k');
-    if (r && k) return { id: r, key: k };
+    const n = params.get('n');
+    if (r && k) return { id: r, key: k, name: n || null };
   } catch (e) {}
 
   try {
     const params = new URLSearchParams(trimmed.replace(/^#/, ''));
     const r = params.get('r');
     const k = params.get('k');
-    if (r && k) return { id: r, key: k };
+    const n = params.get('n');
+    if (r && k) return { id: r, key: k, name: n || null };
   } catch (e) {}
 
   return null;
@@ -973,6 +1071,36 @@ function loadPeerNicknames() {
       for (const pair of arr) peerNicknames.set(pair[0], pair[1]);
     }
   } catch (e) {}
+}
+
+// --- Room name directory (persists across remove/re-add) ---
+function loadRoomNames() {
+  try {
+    const raw = localStorage.getItem(ROOM_NAMES_KEY);
+    if (!raw) return {};
+    const obj = JSON.parse(raw);
+    return (obj && typeof obj === 'object' && !Array.isArray(obj)) ? obj : {};
+  } catch (e) { return {}; }
+}
+
+function saveRoomNames(map) {
+  try { localStorage.setItem(ROOM_NAMES_KEY, JSON.stringify(map)); } catch (e) {}
+}
+
+const roomNames = loadRoomNames();
+
+function rememberRoomName(roomId, name) {
+  if (!roomId || !name) return;
+  if (name === PLACEHOLDER_ROOM_NAME) return;
+  if (roomNames[roomId] === name) return;
+  roomNames[roomId] = name;
+  saveRoomNames(roomNames);
+}
+
+function recallRoomName(roomId) {
+  if (!roomId) return null;
+  const n = roomNames[roomId];
+  return (typeof n === 'string' && n.length > 0) ? n : null;
 }
 
 function hasSeenPolicy() {
@@ -1053,7 +1181,7 @@ function base64ToUint8(b64) {
 // ROOM INFO HELPERS
 // ============================================================
 function createRoomInfo(name, isPublic) {
-  return {
+  const info = {
     id: crypto.randomUUID().slice(0, 8),
     key: crypto.randomUUID().replace(/-/g, ''),
     name: name || 'Room',
@@ -1062,6 +1190,8 @@ function createRoomInfo(name, isPublic) {
     createdAt: Date.now(),
     lastVisited: Date.now(),
   };
+  rememberRoomName(info.id, info.name);
+  return info;
 }
 
 async function computeDmInfo(peerUserId, peerNickname) {
@@ -1258,12 +1388,18 @@ async function connectRoom(state) {
   onRinfo(function (data) {
     if (!data || !data.name) return;
     if (state.info.type !== 'room') return;
+    // Always remember the name — even if we already had one — so it's
+    // available next time this peer rejoins without a live broadcast.
+    rememberRoomName(state.info.id, data.name);
     if (state.info.name === PLACEHOLDER_ROOM_NAME && data.name !== PLACEHOLDER_ROOM_NAME) {
       state.info.name = data.name;
       saveRooms();
       renderSidebar();
       updateActiveHeader();
       addSystemMessage(state, 'Room name synced: ' + data.name);
+      if (activeRoomId === state.info.id) {
+        updateHashForRoom(state);
+      }
     }
   });
 
@@ -1776,7 +1912,7 @@ function removeRoom(roomId) {
   }
 
   const label = state.info.type === 'dm' ? state.info.peerNickname : state.info.name;
-  if (!confirm('Remove "' + label + '"? Messages and transfers in it will be lost.')) return;
+  if (!confirm('Remove "' + label + '"? Messages and transfers in it will be lost. The room name is remembered — you can rejoin later with the same invite link.')) return;
 
   for (const entry of Array.from(incomingFiles.entries())) {
     if (entry[1].roomId === roomId) incomingFiles.delete(entry[0]);
@@ -1806,6 +1942,11 @@ function updateHashForRoom(state) {
   const params = new URLSearchParams();
   params.set('r', state.info.id);
   params.set('k', state.info.key);
+  // Include the room name so invitees see it immediately, even with
+  // no peers online to broadcast it.
+  if (state.info.type === 'room' && state.info.name && state.info.name !== PLACEHOLDER_ROOM_NAME) {
+    params.set('n', state.info.name);
+  }
   history.replaceState(null, '', '#' + params.toString());
 }
 
@@ -1992,15 +2133,17 @@ async function joinDiscoveredRoom(r) {
     await switchRoom(r.roomId);
     return;
   }
+  const remembered = recallRoomName(r.roomId);
   const info = {
     id: r.roomId,
     key: r.roomKey,
-    name: r.name || 'Room',
+    name: remembered || r.name || 'Room',
     type: 'room',
     public: true,
     createdAt: Date.now(),
     lastVisited: Date.now(),
   };
+  rememberRoomName(info.id, info.name);
   closeDiscoverModal();
   await addRoom(info, { connect: true, switchTo: true });
   toast('Joined "' + info.name + '"');
@@ -2014,23 +2157,33 @@ function joinByInviteLink() {
     return;
   }
   if (rooms.has(parsed.id)) {
+    // Already in our sidebar — just switch. Also refresh name if we learned one.
+    const state = rooms.get(parsed.id);
+    const betterName = parsed.name || recallRoomName(parsed.id);
+    if (betterName && state.info.name === PLACEHOLDER_ROOM_NAME) {
+      state.info.name = betterName;
+      saveRooms();
+      renderSidebar();
+    }
     closeDiscoverModal();
     switchRoom(parsed.id);
     toast('You already have this room');
     return;
   }
+  const remembered = parsed.name || recallRoomName(parsed.id);
   const info = {
     id: parsed.id,
     key: parsed.key,
-    name: PLACEHOLDER_ROOM_NAME,
+    name: remembered || PLACEHOLDER_ROOM_NAME,
     type: 'room',
     public: false,
     createdAt: Date.now(),
     lastVisited: Date.now(),
   };
+  if (remembered) rememberRoomName(info.id, remembered);
   closeDiscoverModal();
   addRoom(info, { connect: true, switchTo: true }).then(function () {
-    toast('Joining room…');
+    toast(remembered ? ('Rejoining "' + remembered + '"…') : 'Joining room…');
   });
 }
 
@@ -2073,41 +2226,64 @@ function closePolicyModal(opts) {
 async function init() {
   loadPeerNicknames();
 
+  // 1. Restore saved rooms, using the name directory to fill any gaps
+  //    (e.g. a room we once knew by name but were stuck with placeholder
+  //    when we removed it and re-added it, or never got an rinfo for).
   const savedInfos = loadSavedRooms();
   for (const info of savedInfos) {
     if (!info || !info.id || !info.key) continue;
+    const remembered = recallRoomName(info.id);
+    if (remembered && (!info.name || info.name === PLACEHOLDER_ROOM_NAME)) {
+      info.name = remembered;
+    }
+    // Also backfill the directory from saved rooms
+    if (info.type === 'room' && info.name && info.name !== PLACEHOLDER_ROOM_NAME) {
+      rememberRoomName(info.id, info.name);
+    }
     rooms.set(info.id, createRoomState(info));
   }
 
+  // 2. Parse invite from URL hash (may include name via n=)
   let invite = null;
   try {
     const params = new URLSearchParams(location.hash.slice(1));
     const r = params.get('r');
     const k = params.get('k');
-    if (r && k) invite = { id: r, key: k };
+    const n = params.get('n');
+    if (r && k) invite = { id: r, key: k, name: n || null };
   } catch (e) {}
 
   if (invite && !rooms.has(invite.id)) {
+    const remembered = invite.name || recallRoomName(invite.id);
     const info = {
       id: invite.id,
       key: invite.key,
-      name: PLACEHOLDER_ROOM_NAME,
+      name: remembered || PLACEHOLDER_ROOM_NAME,
       type: 'room',
       public: false,
       createdAt: Date.now(),
       lastVisited: Date.now(),
     };
+    if (remembered) rememberRoomName(info.id, remembered);
     rooms.set(info.id, createRoomState(info));
   } else if (invite && rooms.has(invite.id)) {
+    // Refresh key (should match) and possibly fill in a missing name
     const state = rooms.get(invite.id);
     state.info.key = invite.key;
+    const betterName = invite.name || recallRoomName(invite.id);
+    if (betterName && state.info.name === PLACEHOLDER_ROOM_NAME) {
+      state.info.name = betterName;
+      saveRooms();
+    }
   }
 
+  // 3. Ensure at least one default room
   if (rooms.size === 0) {
     const info = createRoomInfo('General');
     rooms.set(info.id, createRoomState(info));
   }
 
+  // 4. Enforce room cap
   if (rooms.size > MAX_ROOMS) {
     const arr = Array.from(rooms.values());
     arr.sort(function (a, b) { return (b.info.lastVisited||0) - (a.info.lastVisited||0); });
@@ -2117,6 +2293,7 @@ async function init() {
     }
   }
 
+  // 5. Pick active room
   let targetId = (invite && rooms.has(invite.id)) ? invite.id : loadActiveRoomId();
   if (!targetId || !rooms.has(targetId)) {
     targetId = rooms.keys().next().value;
@@ -2126,6 +2303,7 @@ async function init() {
   renderSidebar();
   await switchRoom(targetId);
 
+  // 6. Connect all rooms in parallel — this is the rejoin.
   const connectPromises = [];
   for (const state of rooms.values()) {
     connectPromises.push(
@@ -2374,7 +2552,91 @@ async function init() {
     if (qrModal.classList.contains('active')) { qrModal.classList.remove('active'); return; }
     if (nickModal.classList.contains('active')) { closeNickModal(); return; }
     if (newRoomModal.classList.contains('active')) { closeNewRoomModal(); return; }
+    if (iosInstallModal.classList.contains('active')) { iosInstallModal.classList.remove('active'); return; }
   });
+
+  // ---- PWA: install button + iOS prompt ----
+  window.addEventListener('beforeinstallprompt', function (e) {
+    e.preventDefault();
+    deferredInstallPrompt = e;
+    if (!isStandalone) installBtn.style.display = 'flex';
+  });
+
+  window.addEventListener('appinstalled', function () {
+    deferredInstallPrompt = null;
+    installBtn.style.display = 'none';
+    toast('TosCheZy installed');
+  });
+
+  installBtn.addEventListener('click', async function () {
+    if (deferredInstallPrompt) {
+      deferredInstallPrompt.prompt();
+      const choice = await deferredInstallPrompt.userChoice;
+      if (choice && choice.outcome === 'accepted') {
+        installBtn.style.display = 'none';
+      }
+      deferredInstallPrompt = null;
+      return;
+    }
+    if (isIos) {
+      iosInstallModal.classList.add('active');
+      return;
+    }
+    toast('Use your browser menu → Install / Add to Home Screen');
+  });
+
+  iosInstallCloseBtn.addEventListener('click', function () {
+    iosInstallModal.classList.remove('active');
+  });
+  iosInstallModal.addEventListener('click', function (e) {
+    if (e.target === iosInstallModal) iosInstallModal.classList.remove('active');
+  });
+
+  if (isIos && !isStandalone) {
+    installBtn.style.display = 'flex';
+  }
+
+  // ---- PWA: service worker with update notification ----
+  if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+    try {
+      const registration = await navigator.serviceWorker.register('/sw.js');
+
+      if (registration.waiting) {
+        updateBanner.classList.add('show');
+      }
+
+      registration.addEventListener('updatefound', function () {
+        const newWorker = registration.installing;
+        if (!newWorker) return;
+        newWorker.addEventListener('statechange', function () {
+          if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+            updateBanner.classList.add('show');
+          }
+        });
+      });
+
+      let reloading = false;
+      navigator.serviceWorker.addEventListener('controllerchange', function () {
+        if (reloading) return;
+        reloading = true;
+        window.location.reload();
+      });
+
+      updateBannerBtn.addEventListener('click', function () {
+        if (registration.waiting) {
+          registration.waiting.postMessage({ type: 'SKIP_WAITING' });
+        } else {
+          window.location.reload();
+        }
+      });
+
+      setInterval(function () {
+        registration.update().catch(function () {});
+      }, 30 * 60 * 1000);
+    } catch (err) {
+      console.warn('SW register failed', err);
+    }
+  }
 
   if (!hasSeenPolicy()) {
     setTimeout(openPolicyModal, 400);
@@ -2393,15 +2655,6 @@ async function init() {
       if (sub) sub.textContent = state.peers.size > 0 ? 'online' : 'offline';
     }
   }, 3000);
-}
-
-// ---- Service worker ----
-if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
-  window.addEventListener('load', function () {
-    navigator.serviceWorker.register('/sw.js').catch(function (err) {
-      console.warn('SW register failed', err);
-    });
-  });
 }
 
 init().catch(function (err) {
