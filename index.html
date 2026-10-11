@@ -10,7 +10,7 @@
 <link rel="manifest" href="/manifest.json">
 <link rel="icon" type="image/svg+xml" href="/icon.svg">
 <link rel="apple-touch-icon" href="/icon.svg">
-<title>TosCheZy</title>
+<title>TosCheZy — Passwordless P2P Chat</title>
 <style>
 :root {
   --bg: #0a0a0f;
@@ -796,6 +796,7 @@ const WARN_FILE_SIZE = 50 * 1024 * 1024;
 const PBKDF2_ITERATIONS = 100000;
 const MAX_NICK_LENGTH = 32;
 const MAX_ROOMS = 30;
+const PLACEHOLDER_ROOM_NAME = 'Invited Room';
 
 const ROOMS_KEY = 'toschezy_rooms_v2';
 const ACTIVE_ROOM_KEY = 'toschezy_active_room_v2';
@@ -950,11 +951,6 @@ async function copyToClipboard(text) {
       return ok;
     } catch { return false; }
   }
-}
-
-function shortId(id) {
-  if (!id) return '?';
-  return id.replace(/-/g, '').slice(0, 6);
 }
 
 // ============================================================
@@ -1158,8 +1154,9 @@ async function connectRoom(state) {
   const [sendFileChunk, onFileChunk] = room.makeAction('fchunk');
   const [sendNickUpdate, onNickUpdate] = room.makeAction('nupdate');
   const [sendDmInvite, onDmInvite] = room.makeAction('dminvite');
+  const [sendRinfo, onRinfo] = room.makeAction('rinfo');
 
-  state.actions = { sendMsg, sendFileMeta, sendFileChunk, sendNickUpdate, sendDmInvite };
+  state.actions = { sendMsg, sendFileMeta, sendFileChunk, sendNickUpdate, sendDmInvite, sendRinfo };
 
   // --- Text ---
   onMsg(async (data) => {
@@ -1180,6 +1177,22 @@ async function connectRoom(state) {
     const label = data.oldNickname ? `${data.oldNickname} is now ${data.nickname}` : `A peer is now ${data.nickname}`;
     addSystemMessage(state, label);
     renderSidebar();
+  });
+
+  // --- Room info sync (name only; DMs skip) ---
+  onRinfo((data) => {
+    if (!data || !data.name) return;
+    if (state.info.type !== 'room') return;
+    // Only adopt when our local name is still the invite placeholder
+    // and the incoming name is a real one.
+    if (state.info.name === PLACEHOLDER_ROOM_NAME
+        && data.name !== PLACEHOLDER_ROOM_NAME) {
+      state.info.name = data.name;
+      saveRooms();
+      renderSidebar();
+      updateActiveHeader();
+      addSystemMessage(state, `Room name synced: ${data.name}`);
+    }
   });
 
   // --- DM invites ---
@@ -1245,6 +1258,16 @@ async function connectRoom(state) {
     state.peers.add(peerId);
     addSystemMessage(state, 'A peer joined');
     if (activeRoomId === state.info.id) updateOnlineBadge();
+
+    // Sync room name to the newly-joined peer.
+    // Delay slightly so their action handlers are ready to receive.
+    if (state.info.type === 'room' && state.info.name !== PLACEHOLDER_ROOM_NAME) {
+      setTimeout(() => {
+        try {
+          sendRinfo({ name: state.info.name, type: state.info.type });
+        } catch (e) { console.warn('sendRinfo failed', e); }
+      }, 800);
+    }
   });
   room.onPeerLeave(peerId => {
     state.peers.delete(peerId);
@@ -1821,7 +1844,7 @@ async function init() {
     const info = {
       id: invite.id,
       key: invite.key,
-      name: 'Invited Room',
+      name: PLACEHOLDER_ROOM_NAME,
       type: 'room',
       createdAt: Date.now(),
       lastVisited: Date.now(),
