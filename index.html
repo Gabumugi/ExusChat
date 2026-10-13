@@ -223,6 +223,38 @@ header {
 }
 .online-dot { width:6px; height:6px; border-radius:50%; background:#00e676; box-shadow:0 0 8px #00e676; }
 .online-dot.offline { background:#ff5252; box-shadow:0 0 8px #ff5252; }
+
+/* ===== Connection status ===== */
+.conn-status {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--text-dim);
+  background: var(--surface); padding: 5px 9px;
+  border-radius: 20px; border: 1px solid var(--border);
+  white-space: nowrap; transition: all 0.25s;
+}
+.conn-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: #8888a0;
+  transition: background 0.25s, box-shadow 0.25s;
+}
+.conn-status.state-signaling .conn-dot {
+  background: #ffb74d;
+  box-shadow: 0 0 8px #ffb74d;
+  animation: connPulse 1s infinite;
+}
+.conn-status.state-connected .conn-dot {
+  background: #00e676;
+  box-shadow: 0 0 8px #00e676;
+}
+.conn-status.state-failed .conn-dot {
+  background: #ff5252;
+  box-shadow: 0 0 8px #ff5252;
+}
+@keyframes connPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.7); }
+}
+
 #messages { flex: 1; overflow-y: auto; padding: 16px; scroll-behavior: smooth; }
 #messages::-webkit-scrollbar { width: 4px; }
 #messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
@@ -561,6 +593,8 @@ header {
   .header-title .title-type { display: none; }
   .online-badge { padding: 5px 8px; font-size: 11px; }
   .room-remove { opacity: 0.6; }
+  .conn-status .conn-label { display: none; }
+  .conn-status { padding: 5px 7px; }
 }
 </style>
 </head>
@@ -618,6 +652,10 @@ header {
         <span class="title-type" id="activeRoomType">Room</span>
       </div>
       <div class="header-actions">
+        <div class="conn-status state-idle" id="connStatus" title="Connection state">
+          <span class="conn-dot"></span>
+          <span class="conn-label" id="connLabel">Idle</span>
+        </div>
         <div class="online-badge" title="Peers in this room">
           <div class="online-dot offline" id="onlineDot"></div>
           <span id="onlineCount">1</span>
@@ -814,13 +852,50 @@ const NICK_KEY = 'toschezy_nickname';
 const THEME_KEY = 'toschezy_theme';
 const POLICY_KEY = 'toschezy_policy_seen_v1';
 
-const TURN_CONFIG = null;
+// ---- TURN (optional) ----
+// Add your TURN config(s) here for the ~20% of users behind symmetric NATs.
+// Free options: Metered.ca (50 GB/mo), Cloudflare Calls, Twilio NTS.
+// Format: { urls: 'turn:...', username: '...', credential: '...' }
+const TURN_CONFIGS = [
+  // { urls: 'turn:standard.relay.metered.ca:80', username: 'user', credential: 'pass' },
+];
+
+// ---- ICE servers ----
+// Expanded STUN list gives faster candidate gathering. Cloudflare's STUN is
+// often the fastest from consumer networks.
 const iceServers = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:stun3.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  ...TURN_CONFIGS,
 ];
-if (TURN_CONFIG) iceServers.push(TURN_CONFIG);
-const RTC_CONFIG = { iceServers };
+
+const RTC_CONFIG = {
+  iceServers,
+  iceCandidatePoolSize: 10,   // pre-gather candidates for faster connects
+  bundlePolicy: 'max-bundle',
+  rtcpMuxPolicy: 'require',
+  iceTransportPolicy: 'all',
+};
+
+// ---- Trystero relay config ----
+// Default Trystero waits for 5 trackers. Dropping to 2 saves 3-10s
+// on first connect; the URL list is curated for reliability.
+const RELAY_URLS = [
+  'wss://tracker.openwebtorrent.com:443/announce',
+  'wss://tracker.webtorrent.dev',
+  'wss://tracker.files.fm:7073/announce',
+];
+const RELAY_REDUNDANCY = 2;
+
+const TRYSTERO_CONFIG = {
+  appId: APP_ID,
+  relayUrls: RELAY_URLS,
+  relayRedundancy: RELAY_REDUNDANCY,
+  rtcConfig: RTC_CONFIG,
+};
 
 // ============================================================
 // STATE
@@ -841,10 +916,10 @@ const peerNicknames = new Map();
 /** @type {Map<string, any>} */
 const discoveredRooms = new Map();
 
-// PWA install prompt (fired by Chrome / Edge / Android)
+// PWA install prompt
 let deferredInstallPrompt = null;
 
-// Detect iOS + standalone
+// iOS + standalone detection
 const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent) && !window.MSStream;
 const isStandalone =
   window.matchMedia('(display-mode: standalone)').matches ||
@@ -928,6 +1003,8 @@ const updateBanner = $('updateBanner');
 const updateBannerBtn = $('updateBannerBtn');
 const iosInstallModal = $('iosInstallModal');
 const iosInstallCloseBtn = $('iosInstallCloseBtn');
+const connStatus = $('connStatus');
+const connLabel = $('connLabel');
 
 // ============================================================
 // UTILITIES
@@ -1073,7 +1150,6 @@ function loadPeerNicknames() {
   } catch (e) {}
 }
 
-// --- Room name directory (persists across remove/re-add) ---
 function loadRoomNames() {
   try {
     const raw = localStorage.getItem(ROOM_NAMES_KEY);
@@ -1218,12 +1294,26 @@ function findDmWith(peerUserId) {
 }
 
 // ============================================================
+// TRACKER PRECONNECT
+// ============================================================
+// Warm up WebSocket connections to the trackers before any real room
+// needs them. Trystero reuses these sockets for all subsequent joins,
+// so the first real message doesn't pay the connection cost.
+function preconnectTrackers() {
+  try {
+    joinRoom(TRYSTERO_CONFIG, '__toschezy_preconnect__');
+  } catch (e) {
+    // Non-fatal — real rooms will connect normally
+  }
+}
+
+// ============================================================
 // LOBBY (public discovery)
 // ============================================================
 async function initLobby() {
   if (lobbyRoom) return;
   try {
-    lobbyRoom = joinRoom({ appId: APP_ID, rtcConfig: RTC_CONFIG }, LOBBY_ID);
+    lobbyRoom = joinRoom(TRYSTERO_CONFIG, LOBBY_ID);
     const actions = lobbyRoom.makeAction('rann');
     const sendAnnounce = actions[0];
     const onAnnounce = actions[1];
@@ -1339,7 +1429,7 @@ async function connectRoom(state) {
   state.cryptoKey = await deriveKey(state.info.key, state.info.id);
   ensureRoomDom(state);
 
-  const room = joinRoom({ appId: APP_ID, rtcConfig: RTC_CONFIG }, state.info.id);
+  const room = joinRoom(TRYSTERO_CONFIG, state.info.id);
   state.room = room;
 
   const aMsg = room.makeAction('msg');
@@ -1388,8 +1478,6 @@ async function connectRoom(state) {
   onRinfo(function (data) {
     if (!data || !data.name) return;
     if (state.info.type !== 'room') return;
-    // Always remember the name — even if we already had one — so it's
-    // available next time this peer rejoins without a live broadcast.
     rememberRoomName(state.info.id, data.name);
     if (state.info.name === PLACEHOLDER_ROOM_NAME && data.name !== PLACEHOLDER_ROOM_NAME) {
       state.info.name = data.name;
@@ -1465,7 +1553,10 @@ async function connectRoom(state) {
   room.onPeerJoin(function (peerId) {
     state.peers.add(peerId);
     addSystemMessage(state, 'A peer joined');
-    if (activeRoomId === state.info.id) updateOnlineBadge();
+    if (activeRoomId === state.info.id) {
+      updateOnlineBadge();
+      updateConnectionStatusForActiveRoom();
+    }
 
     if (state.info.type === 'room' && state.info.name !== PLACEHOLDER_ROOM_NAME) {
       setTimeout(function () {
@@ -1479,8 +1570,16 @@ async function connectRoom(state) {
   room.onPeerLeave(function (peerId) {
     state.peers.delete(peerId);
     addSystemMessage(state, 'A peer left');
-    if (activeRoomId === state.info.id) updateOnlineBadge();
+    if (activeRoomId === state.info.id) {
+      updateOnlineBadge();
+      updateConnectionStatusForActiveRoom();
+    }
   });
+
+  // Show "Searching…" until a peer actually joins
+  if (activeRoomId === state.info.id) {
+    setConnectionStatus('signaling', 'Searching…');
+  }
 
   state.connected = true;
 }
@@ -1832,6 +1931,25 @@ function updateOnlineBadge() {
   onlineDot.classList.toggle('offline', count <= 1);
 }
 
+function setConnectionStatus(stateName, labelText) {
+  if (!connStatus) return;
+  connStatus.classList.remove('state-idle', 'state-signaling', 'state-connected', 'state-failed');
+  connStatus.classList.add('state-' + stateName);
+  if (connLabel) connLabel.textContent = labelText;
+}
+
+function updateConnectionStatusForActiveRoom() {
+  const state = rooms.get(activeRoomId);
+  if (!state) { setConnectionStatus('idle', 'Idle'); return; }
+  if (state.peers.size > 0) {
+    setConnectionStatus('connected', 'Connected');
+  } else if (state.room) {
+    setConnectionStatus('signaling', 'Searching…');
+  } else {
+    setConnectionStatus('idle', 'Idle');
+  }
+}
+
 function incrementUnread(state) {
   state.unread = (state.unread || 0) + 1;
   updateRoomItemBadge(state.info.id);
@@ -1887,6 +2005,7 @@ async function switchRoom(roomId) {
   updateActiveHeader();
   updateOnlineBadge();
   updateHeaderPublicToggle();
+  updateConnectionStatusForActiveRoom();
 
   updateHashForRoom(state);
 
@@ -1942,8 +2061,6 @@ function updateHashForRoom(state) {
   const params = new URLSearchParams();
   params.set('r', state.info.id);
   params.set('k', state.info.key);
-  // Include the room name so invitees see it immediately, even with
-  // no peers online to broadcast it.
   if (state.info.type === 'room' && state.info.name && state.info.name !== PLACEHOLDER_ROOM_NAME) {
     params.set('n', state.info.name);
   }
@@ -2157,7 +2274,6 @@ function joinByInviteLink() {
     return;
   }
   if (rooms.has(parsed.id)) {
-    // Already in our sidebar — just switch. Also refresh name if we learned one.
     const state = rooms.get(parsed.id);
     const betterName = parsed.name || recallRoomName(parsed.id);
     if (betterName && state.info.name === PLACEHOLDER_ROOM_NAME) {
@@ -2224,11 +2340,13 @@ function closePolicyModal(opts) {
 // INIT
 // ============================================================
 async function init() {
+  // Warm up tracker WebSockets BEFORE any UI or room work.
+  // This shaves several seconds off the first real join.
+  preconnectTrackers();
+
   loadPeerNicknames();
 
-  // 1. Restore saved rooms, using the name directory to fill any gaps
-  //    (e.g. a room we once knew by name but were stuck with placeholder
-  //    when we removed it and re-added it, or never got an rinfo for).
+  // 1. Restore saved rooms, filling any missing names from the directory
   const savedInfos = loadSavedRooms();
   for (const info of savedInfos) {
     if (!info || !info.id || !info.key) continue;
@@ -2236,14 +2354,13 @@ async function init() {
     if (remembered && (!info.name || info.name === PLACEHOLDER_ROOM_NAME)) {
       info.name = remembered;
     }
-    // Also backfill the directory from saved rooms
     if (info.type === 'room' && info.name && info.name !== PLACEHOLDER_ROOM_NAME) {
       rememberRoomName(info.id, info.name);
     }
     rooms.set(info.id, createRoomState(info));
   }
 
-  // 2. Parse invite from URL hash (may include name via n=)
+  // 2. Parse invite from URL hash
   let invite = null;
   try {
     const params = new URLSearchParams(location.hash.slice(1));
@@ -2267,7 +2384,6 @@ async function init() {
     if (remembered) rememberRoomName(info.id, remembered);
     rooms.set(info.id, createRoomState(info));
   } else if (invite && rooms.has(invite.id)) {
-    // Refresh key (should match) and possibly fill in a missing name
     const state = rooms.get(invite.id);
     state.info.key = invite.key;
     const betterName = invite.name || recallRoomName(invite.id);
@@ -2303,7 +2419,7 @@ async function init() {
   renderSidebar();
   await switchRoom(targetId);
 
-  // 6. Connect all rooms in parallel — this is the rejoin.
+  // 6. Connect all rooms in parallel
   const connectPromises = [];
   for (const state of rooms.values()) {
     connectPromises.push(
@@ -2644,6 +2760,7 @@ async function init() {
 
   await Promise.all(connectPromises);
   renderSidebar();
+  updateConnectionStatusForActiveRoom();
 
   // ---- DM online status refresh ----
   setInterval(function () {
